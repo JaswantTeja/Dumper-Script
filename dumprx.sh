@@ -73,6 +73,7 @@ INPUTDIR="${PROJECT_DIR}"/input		# Firmware Download/Preload Directory
 UTILSDIR="${PROJECT_DIR}"/utils		# Contains Supportive Programs
 OUTDIR="${PROJECT_DIR}"/out			# Contains Final Extracted Files
 TMPDIR="${OUTDIR}"/tmp				# Temporary Working Directory
+SCRIPTDIR="${PROJECT_DIR}"/tools
 
 rm -rf "${TMPDIR}" 2>/dev/null
 mkdir -p "${OUTDIR}" "${TMPDIR}" 2>/dev/null
@@ -99,7 +100,7 @@ SDAT2IMG="${UTILSDIR}"/sdat2img.py
 SIMG2IMG="${UTILSDIR}"/bin/simg2img
 PACKSPARSEIMG="${UTILSDIR}"/bin/packsparseimg
 UNSIN="${UTILSDIR}"/unsin
-PAYLOAD_EXTRACTOR="${UTILSDIR}"/ota_payload_extractor/extract_android_ota_payload.py
+PAYLOAD_EXTRACTOR="${UTILSDIR}"/bin/payload-dumper-go
 DTB_EXTRACTOR="${UTILSDIR}"/extract-dtb.py
 DTC="${UTILSDIR}"/dtc
 VMLINUX2ELF="${UTILSDIR}"/vmlinux-to-elf/vmlinux-to-elf
@@ -118,6 +119,8 @@ RUUDECRYPT="${UTILSDIR}"/RUU_Decrypt_Tool
 EXTRACT_IKCONFIG="${UTILSDIR}"/extract-ikconfig
 UNPACKBOOT="${UTILSDIR}"/unpackboot.sh
 AML_EXTRACT="${UTILSDIR}"/aml-upgrade-package-extract
+AFPTOOL_EXTRACT="${UTILSDIR}"/bin/afptool
+RK_EXTRACT="${UTILSDIR}"/bin/rkImageMaker
 # Set Names of Downloader Utility Programs
 MEGAMEDIADRIVE_DL="${UTILSDIR}"/downloaders/mega-media-drive_dl.sh
 AFHDL="${UTILSDIR}"/downloaders/afh_dl.py
@@ -632,9 +635,7 @@ elif 7z l -ba "${FILEPATH}" | grep tar.md5 | gawk '{print $NF}' | grep -q AP_ 2>
 	fi
 elif 7z l -ba "${FILEPATH}" | grep -q payload.bin 2>/dev/null || [[ $(find "${TMPDIR}" -type f -name "payload.bin" | wc -l) -ge 1 ]]; then
 	printf "AB OTA Payload Detected\n"
-	[[ -f "${FILEPATH}" ]] && 7z e -y "${FILEPATH}" payload.bin 2>/dev/null >> "${TMPDIR}"/zip.log
-	python3 "${PAYLOAD_EXTRACTOR}" payload.bin "${TMPDIR}"
-	rm -f payload.bin
+	${PAYLOAD_EXTRACTOR} -o "${TMPDIR}" "${FILEPATH}"
 elif 7z l -ba "${FILEPATH}" | grep ".*.rar\|.*.zip\|.*.7z\|.*.tar$" 2>/dev/null || [[ $(find "${TMPDIR}" -type f \( -name "*.rar" -o -name "*.zip" -o -name "*.7z" -o -name "*.tar" \) | wc -l) -ge 1 ]]; then
 	printf "Rar/Zip/7Zip/Tar Archived Firmware Detected\n"
 	if [[ -f "${FILEPATH}" ]]; then
@@ -668,6 +669,20 @@ elif 7z l -ba "${FILEPATH}" | grep -q "UPDATE.APP" 2>/dev/null || [[ $(find "${T
 		[[ ! -s super.img.raw && -f super.img ]] && mv super.img super.img.raw
 	fi
 	superimage_extract || exit 1
+elif 7z l -ba "${FILEPATH}" | grep -q "rockchip" 2>/dev/null || [[ $(find "${TMPDIR}" -type f -name "rockchip") ]]; then
+	printf "Rockchip Detected\n"
+	${RK_EXTRACT} -unpack "${FILEPATH}" ${TMPDIR}
+	${AFPTOOL_EXTRACT} -unpack ${TMPDIR}/firmware.img ${TMPDIR}
+	[ -f ${TMPDIR}/Image/super.img ] && {
+		mv ${TMPDIR}/Image/super.img ${TMPDIR}/super.img
+		cd ${TMPDIR}
+		superimage_extract || exit 1
+		cd -
+	}
+	for partition in $PARTITIONS; do
+		[[ -e "${TMPDIR}/Image/${partition}.img" ]] && mv "${TMPDIR}/Image/${partition}.img" "${OUTDIR}/${partition}.img"
+		[[ -e "${TMPDIR}/${partition}.img" ]] && mv "${TMPDIR}/${partition}.img" "${OUTDIR}/${partition}.img"
+	done
 fi
 
 # PAC Archive Check
@@ -894,7 +909,7 @@ brand=$(grep -m1 -oP "(?<=^ro.product.brand=).*" -hs {system,system/system,vendo
 [[ -z "${brand}" ]] && brand=$(grep -m1 -oP "(?<=^ro.product.brand=).*" -hs {oppo_product,my_product}/build*.prop | head -1)
 [[ -z "${brand}" ]] && brand=$(grep -m1 -oP "(?<=^ro.product.brand=).*" -hs vendor/euclid/*/build.prop | head -1)
 [[ -z "${brand}" ]] && brand=$(echo "$fingerprint" | cut -d'/' -f1)
-codename=$(grep -m1 -oP "(?<=^ro.product.device=).*" -hs {system,system/system,vendor}/build*.prop | head -1)
+codename=$(grep -m1 -oP "(?<=^ro.product.device=).*" -hs {vendor,system,system/system}/build*.prop | head -1)
 [[ -z "${codename}" ]] && codename=$(grep -m1 -oP "(?<=^ro.vendor.product.device.oem=).*" -hs vendor/euclid/odm/build.prop | head -1)
 [[ -z "${codename}" ]] && codename=$(grep -m1 -oP "(?<=^ro.product.vendor.device=).*" -hs vendor/build*.prop | head -1)
 [[ -z "${codename}" ]] && codename=$(grep -m1 -oP "(?<=^ro.vendor.product.device=).*" -hs vendor/build*.prop | head -1)
@@ -980,6 +995,17 @@ chown "$(whoami)" ./* -R
 chmod -R u+rwX ./*		#ensure final permissions
 find "$OUTDIR" -type f -printf '%P\n' | sort | grep -v ".git/" > "$OUTDIR"/all_files.txt
 
+# Generate Dummy DT
+dummydtout="dummy-device-tree"
+mkdir -p $dummydtout
+chmod a+x $SCRIPTDIR/dummy_dt.sh
+bash $SCRIPTDIR/dummy_dt.sh $OUTDIR
+rm -rf $PROJECT_DIR/dummy_dt/working
+cp -r $PROJECT_DIR/dummy_dt/* $OUTDIR/$dummydtout
+
+# Regenerate all_files.txt
+find "$OUTDIR" -type f -printf '%P\n' | sort | grep -v ".git/" > "$OUTDIR"/all_files.txt
+
 # Generate LineageOS Trees
 aospdtout="lineage-device-tree"
 mkdir -p $aospdtout
@@ -991,64 +1017,231 @@ rm -rf $(find $aospdtout -type d -name ".git")
 # Regenerate all_files.txt
 find "$OUTDIR" -type f -printf '%P\n' | sort | grep -v ".git/" > "$OUTDIR"/all_files.txt
 
+# Generate Files having the sha1sum values of the Blobs
+function write_sha1sum(){
+	# Usage: write_sha1sum <file> <destination_file>
+
+	local SRC_FILE=$1
+	local DST_FILE=$2
+
+	# Temporary file
+	local TMP_FILE=${SRC_FILE}.sha1sum.tmp
+
+	# Get rid of all the Blank lines and Comments
+	( cat ${SRC_FILE} | grep -v '^[[:space:]]*$' | grep -v "# " ) > ${TMP_FILE}
+
+	# Amend the sha1sum of blobs in the Destination File
+	cp ${SRC_FILE} ${DST_FILE}
+	cat ${TMP_FILE} | while read -r i; do {
+		local BLOB=${i}
+
+		# Do we have a "-" before the blob's path? If yes, then remove it
+		local BLOB_TOPDIR=$(echo ${BLOB} | cut -d / -f1)
+		[ "${BLOB_TOPDIR:0:1}" = "-" ] && local BLOB=${BLOB_TOPDIR/-/}/${BLOB/${BLOB_TOPDIR}\//}
+
+		# Is it a non- /vendor blob?
+		[ ! -e "${BLOB}" ] && {
+			# for system libs, bins etc.
+			if [ -e "system/${BLOB}" ]; then
+				local BLOB="system/${BLOB}"
+			# for system-as-root system libs, bins etc.
+			elif [ -e "system/system/${BLOB}" ]; then
+				local BLOB="system/system/${BLOB}"
+			fi
+		}
+		local SHA1=$(sha1sum ${BLOB} | gawk '{print $1}')
+
+		local BLOB=${i} # Switch back to the Original Blob's name
+		local ORG_EXP="${BLOB}"
+		local FINAL_EXP="${BLOB}|${SHA1}"
+
+		# Amend the |sha1sum
+		sed -i "s:${ORG_EXP}:${FINAL_EXP}:g" "${DST_FILE}"
+	}; done
+
+	# Delete the Temporary file
+	rm ${TMP_FILE}
+}
+
 # Generate proprietary-files.txt
 printf "Generating proprietary-files.txt...\n"
 bash "${UTILSDIR}"/android_tools/tools/proprietary-files.sh "${OUTDIR}"/all_files.txt >/dev/null
-cp -f "${UTILSDIR}"/android_tools/working/proprietary-files.txt proprietary-files.txt
+printf "# All blobs from %s, unless pinned\n" "${description}" > "${OUTDIR}"/proprietary-files.txt
+cat "${UTILSDIR}"/android_tools/working/proprietary-files.txt >> "${OUTDIR}"/proprietary-files.txt
+
+# Generate proprietary-files.sha1
+printf "Generating proprietary-files.sha1...\n"
+printf "# All blobs are from \"%s\" and are pinned with sha1sum values\n" "${description}" > "${OUTDIR}"/proprietary-files.sha1
+write_sha1sum ${UTILSDIR}/android_tools/working/proprietary-files.{txt,sha1}
+cat "${UTILSDIR}"/android_tools/working/proprietary-files.sha1 >> "${OUTDIR}"/proprietary-files.sha1
+
+# Stash the changes done at ${UTILSDIR}/android_tools
+git -C "${UTILSDIR}"/android_tools/ add --all
+git -C "${UTILSDIR}"/android_tools/ stash
+
+# Generate all_files.sha1
+printf "Generating all_files.sha1...\n"
+write_sha1sum "$OUTDIR"/all_files.{txt,sha1.tmp}
+( cat "$OUTDIR"/all_files.sha1.tmp | grep -v all_files.txt ) > "$OUTDIR"/all_files.sha1		# all_files.txt will be regenerated
+rm -rf "$OUTDIR"/all_files.sha1.tmp
 
 # Regenerate all_files.txt
+printf "Generating all_files.txt...\n"
 find "$OUTDIR" -type f -printf '%P\n' | sort | grep -v ".git/" > "$OUTDIR"/all_files.txt
 
 rm -rf "${TMPDIR}" 2>/dev/null
 
-GIT_USER="$(git config --get user.name)"
-GIT_ORG=$(< "${PROJECT_DIR}"/.gitlab_group)
-# Gitlab Vars
-GITLAB_TOKEN=$(< "${PROJECT_DIR}"/.gitlab_token)
-GITLAB_INSTANCE="gitlab.com"
-GITLAB_HOST="https://${GITLAB_INSTANCE}"
-# Remove The Journal File Inside System/Vendor
-find . -mindepth 2 -type d -name "\[SYS\]" -exec rm -rf {} \; 2>/dev/null
-printf "\nFinal Repository Should Look Like...\n" && ls -lAog
-printf "\n\nStarting Git Init...\n"
+if [[ -s "${PROJECT_DIR}"/.github_token ]]; then
+	GITHUB_TOKEN=$(< "${PROJECT_DIR}"/.github_token)	# Write Your Github Token In a Text File
+	[[ -z "$(git config --get user.email)" ]] && git config user.email "neilchetty4559@gmail.com"
+	[[ -z "$(git config --get user.name)" ]] && git config user.name "neilchetty"
+	if [[ -s "${PROJECT_DIR}"/.github_orgname ]]; then
+		GIT_ORG=$(< "${PROJECT_DIR}"/.github_orgname)	# Set Your Github Organization Name
+	else
+		GIT_USER="$(git config --get user.name)"
+		GIT_ORG="${GIT_USER}"				# Otherwise, Your Username will be used
+	fi
+	# Check if already dumped or not
+	curl -sf "https://raw.githubusercontent.com/${GIT_ORG}/${repo}/${branch}/all_files.txt" 2>/dev/null && { printf "Firmware already dumped!\nGo to https://github.com/%s/%s/tree/%s\n" "${GIT_ORG}" "${repo}" "${branch}" && exit 1; }
+	# Remove The Journal File Inside System/Vendor
+	find . -mindepth 2 -type d -name "\[SYS\]" -exec rm -rf {} \; 2>/dev/null
+	# Files larger than 62MB will be split into 47MB parts as *.aa, *.ab, etc.
+	mkdir -p "${TMPDIR}" 2>/dev/null
+	find . -size +62M | cut -d'/' -f'2-' >| "${TMPDIR}"/.largefiles
+	if [[ -s "${TMPDIR}"/.largefiles ]]; then
+		printf '#!/bin/bash\n\n' > join_split_files.sh
+		while read -r l; do
+			split -b 47M "${l}" "${l}".
+			rm -f "${l}" 2>/dev/null
+			printf "cat %s.* 2>/dev/null >> %s\n" "${l}" "${l}" >> join_split_files.sh
+			printf "rm -f %s.* 2>/dev/null\n" "${l}" >> join_split_files.sh
+		done < "${TMPDIR}"/.largefiles
+		chmod a+x join_split_files.sh 2>/dev/null
+	fi
+	rm -rf "${TMPDIR}" 2>/dev/null
+	printf "\nFinal Repository Should Look Like...\n" && ls -lAog
+	printf "\n\nStarting Git Init...\n"
+	git init		# Insure Your Github Authorization Before Running This Script
+	git config --global http.postBuffer 524288000		# A Simple Tuning to Get Rid of curl (18) error while `git push`
+	git checkout -b "${branch}" || { git checkout -b "${incremental}" && export branch="${incremental}"; }
+	find . \( -name "*sensetime*" -o -name "*.lic" \) | cut -d'/' -f'2-' >| .gitignore
+	[[ ! -s .gitignore ]] && rm .gitignore
+	git add --all
+	if [[ "${GIT_ORG}" == "${GIT_USER}" ]]; then
+		curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -d '{"name": "'"${repo}"'", "description": "'"${description}"'"}' "https://api.github.com/user/repos" >/dev/null 2>&1
+	else
+		curl -s -X POST -H "Authorization: token ${GITHUB_TOKEN}" -d '{ "name": "'"${repo}"'", "description": "'"${description}"'"}' "https://api.github.com/orgs/${GIT_ORG}/repos" >/dev/null 2>&1
+	fi
+	curl -s -X PUT -H "Authorization: token ${GITHUB_TOKEN}" -H "Accept: application/vnd.github.mercy-preview+json" -d '{ "names": ["'"${platform}"'","'"${manufacturer}"'","'"${top_codename}"'","firmware","dump"]}' "https://api.github.com/repos/${GIT_ORG}/${repo}/topics" 	# Update Repository Topics
+	git remote add origin https://github.com/${GIT_ORG}/${repo}.git
+	git commit -asm "Add ${description}"
+	{ [[ $(du -bs .) -lt 1288490188 ]] && git push https://${GITHUB_TOKEN}@github.com/${GIT_ORG}/${repo}.git "${branch}"; } || (
+		git update-ref -d HEAD
+		git reset system/ vendor/
+		git checkout -b "${branch}" || { git checkout -b "${incremental}" && export branch="${incremental}"; }
+		git commit -asm "Add extras for ${description}"
+		git push https://${GITHUB_TOKEN}@github.com/${GIT_ORG}/${repo}.git "${branch}"
+		git add vendor/
+		git commit -asm "Add vendor for ${description}"
+		git push https://${GITHUB_TOKEN}@github.com/${GIT_ORG}/${repo}.git "${branch}"
+		git add system/system/app/ system/system/priv-app/ || git add system/app/ system/priv-app/
+		git commit -asm "Add apps for ${description}"
+		git push https://${GITHUB_TOKEN}@github.com/${GIT_ORG}/${repo}.git "${branch}"
+		git add system/
+		git commit -asm "Add system for ${description}"
+		git push https://${GITHUB_TOKEN}@github.com/${GIT_ORG}/${repo}.git "${branch}"
+	)
+	# Telegram channel post
+	if [[ -s "${PROJECT_DIR}"/.tg_token ]]; then
+		TG_TOKEN=$(< "${PROJECT_DIR}"/.tg_token)
+		if [[ -s "${PROJECT_DIR}"/.tg_chat ]]; then		# TG Channel ID
+			CHAT_ID=$(< "${PROJECT_DIR}"/.tg_chat)
+		else
+			CHAT_ID="@neil_dumps"
+		fi
+		printf "Sending telegram notification...\n"
+		printf "<b>Brand: %s</b>" "${brand}" >| "${OUTDIR}"/tg.html
+		{
+			printf "\n<b>Device: %s</b>" "${codename}"
+			printf "\n<b>Platform: %s</b>" "${platform}"
+			printf "\n<b>Version:</b> %s" "${release}"
+			printf "\n<b>Fingerprint:</b> %s" "${fingerprint}"
+			printf "\n<a href=\"https://github.com/%s/%s/tree/%s/\">Github Tree</a>" "${GIT_ORG}" "${repo}" "${branch}"
+			printf "\n"
+			printf "\n<b>By: @neil_dumps</b>"
+		} >> "${OUTDIR}"/tg.html
+		TEXT=$(< "${OUTDIR}"/tg.html)
+		rm -rf "${OUTDIR}"/tg.html
+		curl -s "https://api.telegram.org/bot${TG_TOKEN}/sendmessage" --data "text=${TEXT}&chat_id=${CHAT_ID}&parse_mode=HTML&disable_web_page_preview=True" || printf "Telegram Notification Sending Error.\n"
+	fi
 
-git init		# Insure Your GitLab Authorization Before Running This Script
-git config --global http.postBuffer 524288000		# A Simple Tuning to Get Rid of curl (18) error while `git push`
-git checkout -b "${branch}" || { git checkout -b "${incremental}" && export branch="${incremental}"; }
-find . \( -name "*sensetime*" -o -name "*.lic" \) | cut -d'/' -f'2-' >| .gitignore
-[[ ! -s .gitignore ]] && rm .gitignore
-[[ -z "$(git config --get user.email)" ]] && git config user.email "neilchetty4559@gmail.com"
-[[ -z "$(git config --get user.name)" ]] && git config user.name "neilchetty"
-git add --all
-# Create Subgroup
-GRP_ID=$(curl -s --request GET --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${GITLAB_HOST}/api/v4/groups/${GIT_ORG}" | jq -r '.id')
-curl --request POST \
---header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
---header "Content-Type: application/json" \
---data '{"name": "'"${brand}"'", "path": "'"$(echo ${brand} | tr [:upper:] [:lower:])"'", "visibility": "public", "parent_id": "'"${GRP_ID}"'"}' \
-"${GITLAB_HOST}/api/v4/groups/"
-echo ""
-# Subgroup ID
-get_gitlab_subgrp_id(){
-	local SUBGRP=$(echo "$1" | tr '[:upper:]' '[:lower:]')
-	curl -s --request GET --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "${GITLAB_HOST}/api/v4/groups/${GIT_ORG}/subgroups" | jq -r .[] | jq -r .path,.id > /tmp/subgrp.txt
-	local N_TMP=$(wc -l /tmp/subgrp.txt | cut -d\  -f1)
-	local i
-	for ((i=1; i<=$N_TMP; i++))
-	do
-		local TMP_I=$(cat /tmp/subgrp.txt | head -"$i" | tail -1)
-		[[ "$TMP_I" == "$SUBGRP" ]] && cat /tmp/subgrp.txt | head -$(("$i"+1)) | tail -1 > "$2"
-	done
-	}
-get_gitlab_subgrp_id ${brand} /tmp/subgrp_id.txt
-SUBGRP_ID=$(< /tmp/subgrp_id.txt)
-# Create Repository
-curl -s \
---header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
--X POST \
-"${GITLAB_HOST}/api/v4/projects?name=${codename}&namespace_id=${SUBGRP_ID}&visibility=public"
-# Get Project/Repo ID
-get_gitlab_project_id(){
+elif [[ -s "${PROJECT_DIR}"/.gitlab_token ]]; then
+	if [[ -s "${PROJECT_DIR}"/.gitlab_group ]]; then
+		GIT_ORG=$(< "${PROJECT_DIR}"/.gitlab_group)	# Set Your Gitlab Group Name
+	else
+		GIT_USER="$(git config --get user.name)"
+		GIT_ORG="${GIT_USER}"				# Otherwise, Your Username will be used
+	fi
+
+	# Gitlab Vars
+	GITLAB_TOKEN=$(< "${PROJECT_DIR}"/.gitlab_token)	# Write Your Gitlab Token In a Text File
+	if [ -f "${PROJECT_DIR}"/.gitlab_instance ]; then
+		GITLAB_INSTANCE=$(< "${PROJECT_DIR}"/.gitlab_instance)
+	else
+		GITLAB_INSTANCE="gitlab.com"
+	fi
+	GITLAB_HOST="https://${GITLAB_INSTANCE}"
+
+	# Check if already dumped or not
+	[[ $(curl -sL "${GITLAB_HOST}/${GIT_ORG}/${repo}/-/raw/${branch}/all_files.txt" | grep "all_files.txt") ]] && { printf "Firmware already dumped!\nGo to https://"$GITLAB_INSTANCE"/${GIT_ORG}/${repo}/-/tree/${branch}\n" && exit 1; }
+
+	# Remove The Journal File Inside System/Vendor
+	find . -mindepth 2 -type d -name "\[SYS\]" -exec rm -rf {} \; 2>/dev/null
+	printf "\nFinal Repository Should Look Like...\n" && ls -lAog
+	printf "\n\nStarting Git Init...\n"
+
+	git init		# Insure Your GitLab Authorization Before Running This Script
+	git config --global http.postBuffer 524288000		# A Simple Tuning to Get Rid of curl (18) error while `git push`
+	git checkout -b "${branch}" || { git checkout -b "${incremental}" && export branch="${incremental}"; }
+	find . \( -name "*sensetime*" -o -name "*.lic" \) | cut -d'/' -f'2-' >| .gitignore
+	[[ ! -s .gitignore ]] && rm .gitignore
+	[[ -z "$(git config --get user.email)" ]] && git config user.email "nc.neilchetty@gmail.com"
+	[[ -z "$(git config --get user.name)" ]] && git config user.name "neilchetty"
+	git add --all
+
+	# Create Subgroup
+	GRP_ID=$(curl -s --request GET --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" "${GITLAB_HOST}/api/v4/groups/${GIT_ORG}" | jq -r '.id')
+	curl --request POST \
+	--header "PRIVATE-TOKEN: $GITLAB_TOKEN" \
+	--header "Content-Type: application/json" \
+	--data '{"name": "'"${brand}"'", "path": "'"$(echo ${brand} | tr [:upper:] [:lower:])"'", "visibility": "public", "parent_id": "'"${GRP_ID}"'"}' \
+	"${GITLAB_HOST}/api/v4/groups/"
+	echo ""
+
+	# Subgroup ID
+	get_gitlab_subgrp_id(){
+		local SUBGRP=$(echo "$1" | tr '[:upper:]' '[:lower:]')
+		curl -s --request GET --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "${GITLAB_HOST}/api/v4/groups/${GIT_ORG}/subgroups" | jq -r .[] | jq -r .path,.id > /tmp/subgrp.txt
+		local N_TMP=$(wc -l /tmp/subgrp.txt | cut -d\  -f1)
+		local i
+		for ((i=1; i<=$N_TMP; i++))
+		do
+			local TMP_I=$(cat /tmp/subgrp.txt | head -"$i" | tail -1)
+			[[ "$TMP_I" == "$SUBGRP" ]] && cat /tmp/subgrp.txt | head -$(("$i"+1)) | tail -1 > "$2"
+		done
+		}
+
+	get_gitlab_subgrp_id ${brand} /tmp/subgrp_id.txt
+	SUBGRP_ID=$(< /tmp/subgrp_id.txt)
+
+	# Create Repository
+	curl -s \
+	--header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+	-X POST \
+	"${GITLAB_HOST}/api/v4/projects?name=${codename}&namespace_id=${SUBGRP_ID}&visibility=public"
+
+	# Get Project/Repo ID
+	get_gitlab_project_id(){
 		local PROJ="$1"
 		curl -s --request GET --header "PRIVATE-TOKEN: $GITLAB_TOKEN" "${GITLAB_HOST}/api/v4/groups/$2/projects" | jq -r .[] | jq -r .path,.id > /tmp/proj.txt
 		local N_TMP=$(wc -l /tmp/proj.txt | cut -d\  -f1)
@@ -1059,48 +1252,64 @@ get_gitlab_project_id(){
 			[[ "$TMP_I" == "$PROJ" ]] && cat /tmp/proj.txt | head -$(("$i"+1)) | tail -1 > "$3"
 		done
 		}
-get_gitlab_project_id ${codename} ${SUBGRP_ID} /tmp/proj_id.txt
-PROJECT_ID=$(< /tmp/proj_id.txt)
-# Delete the Temporary Files
-rm -rf /tmp/{subgrp,subgrp_id,proj,proj_id}.txt
-# Commit and Push
-# Pushing via HTTPS doesn't work on GitLab for Large Repos (it's an issue with gitlab for large repos)
-# NOTE: Your SSH Keys Needs to be Added to your Gitlab Instance
-git remote add origin git@${GITLAB_INSTANCE}:${GIT_ORG}/${repo}.git
-git commit -asm "Add ${description}"
-# Ensure that the target repo is public
-curl --request PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" --url ''"${GITLAB_HOST}"'/api/v4/projects/'"${PROJECT_ID}"'' --data "visibility=public"
-printf "\n"
-# Push the repo to GitLab
-while [[ ! $(curl -sL "${GITLAB_HOST}/${GIT_ORG}/${repo}/-/raw/${branch}/all_files.txt" | grep "all_files.txt") ]]
-do
-	printf "\nPushing to %s via SSH...\nBranch:%s\n" "${GITLAB_HOST}/${GIT_ORG}/${repo}.git" "${branch}"
-	sleep 1
-	git push -u origin ${branch}
-	sleep 1
-done
-# Update the Default Branch
-curl	--request PUT \
-	--header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
-	--url ''"${GITLAB_HOST}"'/api/v4/projects/'"${PROJECT_ID}"'' \
-	--data "default_branch=${branch}"
-printf "\n"
+	get_gitlab_project_id ${codename} ${SUBGRP_ID} /tmp/proj_id.txt
+	PROJECT_ID=$(< /tmp/proj_id.txt)
+
+	# Delete the Temporary Files
+	rm -rf /tmp/{subgrp,subgrp_id,proj,proj_id}.txt
+
+	# Commit and Push
+	# Pushing via HTTPS doesn't work on GitLab for Large Repos (it's an issue with gitlab for large repos)
+	# NOTE: Your SSH Keys Needs to be Added to your Gitlab Instance
+	git remote add origin git@${GITLAB_INSTANCE}:${GIT_ORG}/${repo}.git
+	git commit -asm "Add ${description}"
+
+	# Ensure that the target repo is public
+	curl --request PUT --header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" --url ''"${GITLAB_HOST}"'/api/v4/projects/'"${PROJECT_ID}"'' --data "visibility=public"
+	printf "\n"
+
+	# Push the repo to GitLab
+	while [[ ! $(curl -sL "${GITLAB_HOST}/${GIT_ORG}/${repo}/-/raw/${branch}/all_files.txt" | grep "all_files.txt") ]]
+	do
+		printf "\nPushing to %s via SSH...\nBranch:%s\n" "${GITLAB_HOST}/${GIT_ORG}/${repo}.git" "${branch}"
+		sleep 1
+		git push -u origin ${branch}
+		sleep 1
+	done
+
+	# Update the Default Branch
+	curl	--request PUT \
+		--header "PRIVATE-TOKEN: ${GITLAB_TOKEN}" \
+		--url ''"${GITLAB_HOST}"'/api/v4/projects/'"${PROJECT_ID}"'' \
+		--data "default_branch=${branch}"
+	printf "\n"
+
 	# Telegram channel post
-if [[ -s "${PROJECT_DIR}"/.tg_token ]]; then
-	TG_TOKEN=$(< "${PROJECT_DIR}"/.tg_token)
-	CHAT_ID="@neil_dumps"
-	printf "Sending telegram notification...\n"
-	printf "<b>Brand: %s</b>" "${brand}" >| "${OUTDIR}"/tg.html
-	{
-		printf "\n<b>Device: %s</b>" "${codename}"
-		printf "\n<b>Platform: %s</b>" "${platform}"
-		printf "\n<b>Version:</b> %s" "${release}"
-		printf "\n<b>Fingerprint:</b> %s" "${fingerprint}"
-		printf "\n<a href=\"${GITLAB_HOST}/%s/%s/-/tree/%s/\">Gitlab Tree</a>" "${GIT_ORG}" "${repo}" "${branch}"
-		printf "\n"
-		printf "\n<b>By: @neil_dumps"
-	} >> "${OUTDIR}"/tg.html
-	TEXT=$(< "${OUTDIR}"/tg.html)
-	rm -rf "${OUTDIR}"/tg.html
-	curl -s "https://api.telegram.org/bot${TG_TOKEN}/sendmessage" --data "text=${TEXT}&chat_id=${CHAT_ID}&parse_mode=HTML&disable_web_page_preview=True" || printf "Telegram Notification Sending Error.\n"
+	if [[ -s "${PROJECT_DIR}"/.tg_token ]]; then
+		TG_TOKEN=$(< "${PROJECT_DIR}"/.tg_token)
+		if [[ -s "${PROJECT_DIR}"/.tg_chat ]]; then		# TG Channel ID
+			CHAT_ID=$(< "${PROJECT_DIR}"/.tg_chat)
+		else
+			CHAT_ID="@neil_dumps"
+		fi
+		printf "Sending telegram notification...\n"
+		printf "<b>Brand: %s</b>" "${brand}" >| "${OUTDIR}"/tg.html
+		{
+			printf "\n<b>Device: %s</b>" "${codename}"
+			printf "\n<b>Platform: %s</b>" "${platform}"
+			printf "\n<b>Version:</b> %s" "${release}"
+			printf "\n<b>Fingerprint:</b> %s" "${fingerprint}"
+			printf "\n<a href=\"${GITLAB_HOST}/%s/%s/-/tree/%s/\">Gitlab Tree</a>" "${GIT_ORG}" "${repo}" "${branch}"
+			printf "\nDumped By DumprX"
+			printf "\n"
+			printf "\n<b>Join: @neil_dumps</b>"
+		} >> "${OUTDIR}"/tg.html
+		TEXT=$(< "${OUTDIR}"/tg.html)
+		rm -rf "${OUTDIR}"/tg.html
+		curl -s "https://api.telegram.org/bot${TG_TOKEN}/sendmessage" --data "text=${TEXT}&chat_id=${CHAT_ID}&parse_mode=HTML&disable_web_page_preview=True" || printf "Telegram Notification Sending Error.\n"
+	fi
+
+else
+	printf "Dumping done locally.\n"
+	exit
 fi
